@@ -2,32 +2,31 @@ package main
 
 import "net/http"
 import "fmt"
-//import "flag"
 import "encoding/json"
 import "path/filepath"
 import "io/ioutil"
 import "os"
 import "io"
 import "./assetpack"
-import "bitbucket.org/kardianos/osext"
 import "os/exec"
 
 var assetStatJSON string
-var serverAddress = "http://151.226.92.200:8080"
+var serverAddress = "http://151.225.0.62:8989"
+var downloadDir string
 
 func CreateFile(path string) *os.File {
-    var dir = filepath.Dir(path)
-    err := os.MkdirAll(dir, 0777)
-    if err != nil {
-        panic(err)
-    }
+	var dir = filepath.Dir(path)
+	err := os.MkdirAll(dir, 0777)
+	if err != nil {
+		panic(err)
+	}
 
-    f, err := os.Create(path)
-    if err != nil {
-        panic(err)
-    }
+	f, err := os.Create(path)
+	if err != nil {
+		panic(err)
+	}
 
-    return f
+	return f
 }
 
 type ProgressReader func(written int64)
@@ -50,9 +49,9 @@ func CopyProgress(dst io.Writer, src io.Reader, pf ProgressReader) (written int6
 			if nw > 0 {
 				written += int64(nw)
 
-                if pf != nil {
-                    pf(written)
-                }
+				if pf != nil {
+					pf(written)
+				}
 			}
 			if ew != nil {
 				err = ew
@@ -74,39 +73,50 @@ func CopyProgress(dst io.Writer, src io.Reader, pf ProgressReader) (written int6
 	return written, err
 }
 
+func downloadFileData(path string, httpPath string) {
+	outPath, err := filepath.Abs(downloadDir + path)
+	if err != nil {
+		panic(err)
+	}
+
+	out := CreateFile(outPath)
+
+	res, err := http.Get(httpPath)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	r := func(written int64) {
+		var percent = int64((float64(written) / float64(res.ContentLength)) * 100.0)
+
+		fmt.Printf("\rDownloading '%s'...%v%%", path, percent)
+
+		if percent >= 100 {
+			fmt.Printf("\n")
+		}
+	}
+
+	_, err = CopyProgress(out, res.Body, r)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	out.Close()
+	res.Body.Close()
+}
+
+func downloadFilePatcher(path string) {
+	var httpPath string = serverAddress + "/patcher/"
+	httpPath = filepath.ToSlash(httpPath)
+
+	downloadFileData(path, httpPath)
+}
+
 func downloadFile(path string) {
-    var filePath string = serverAddress + "/files/" + path
-    filePath = filepath.ToSlash(filePath)
+	var filePath string = serverAddress + "/files/" + path
+	filePath = filepath.ToSlash(filePath)
 
-    outPath, err := filepath.Abs("download/" + path)
-    if err != nil {
-        panic(err)
-    }
-
-    out := CreateFile(outPath)
-
-    res, err := http.Get(filePath)
-    if err != nil {
-        fmt.Println(err)
-    }
-
-    r := func(written int64) {
-        var percent = int64((float64(written) / float64(res.ContentLength)) * 100.0)
-
-        fmt.Printf("\rDownloading '%s'...%v%%", path, percent)
-
-        if percent >= 100 {
-            fmt.Printf("\n")
-        }
-    }
-
-    _, err = CopyProgress(out, res.Body, r)
-    if err != nil {
-        fmt.Println(err)
-    }
-
-    out.Close()
-    res.Body.Close()
+	downloadFileData(path, filePath)
 }
 
 func copyFile(dst, src string) error {
@@ -126,105 +136,102 @@ func copyFile(dst, src string) error {
 }
 
 func main() {
-    // Clean up upgrade
-    for {
-        binAbs, _ := osext.Executable()
-        binDir := filepath.Dir(binAbs)
-        bin := filepath.Base(binAbs)
-        oldBin := binDir + "/~" + bin
+	// Clean up upgrade
+	for {
+		binAbs := os.Args[0]
+		binDir := filepath.Dir(binAbs)
+		bin := filepath.Base(binAbs)
+		oldBin := binDir + "/~" + bin
 
-        if _, err := os.Stat(oldBin); os.IsNotExist(err) {
-            break
-        }
+		if _, err := os.Stat(oldBin); os.IsNotExist(err) {
+			break
+		}
 
-        err := os.Remove(oldBin)
-        if err == nil {
-            break
-        } else {
-            fmt.Println(err)
-        }
-    }
-    
-    //var dir = flag.String("dir", "files", "Directory to serve files from")
-    //var port = flag.Int("port", 8080, "Port for HTTP server to listen on")
-    //flag.Parse()
+		fmt.Println("Removing old patcher.")
 
-    // Convert path to absolute
-    //absDir, _ := filepath.Abs(*dir)
+		err := os.Remove(oldBin)
+		if err == nil {
+			break
+		} else {
+			fmt.Println(err)
+		}
+	}
 
-    //assetPack := assetpack.Load(absDir)
+	res, err := http.Get(serverAddress + "/stat/")
+	if err != nil {
+		fmt.Println(err)
+	}
 
-    /*b, err := json.MarshalIndent(assetPack, "", "")
-    assetStatJSON = string(b)
-    if err != nil {
-        panic(err)
-    }*/
+	stat, err := ioutil.ReadAll(res.Body)
+	res.Body.Close()
+	if err != nil {
+		fmt.Println(err)
+	}
 
-    res, err := http.Get(serverAddress + "/stat/")
-    if err != nil {
-        fmt.Println(err)
-    }
+	var assetPack assetpack.AssetPack
+	err = json.Unmarshal(stat, &assetPack)
+	if err != nil {
+		fmt.Println(err)
+	}
 
-    stat, err := ioutil.ReadAll(res.Body)
-    res.Body.Close()
-    if err != nil {
-        fmt.Println(err)
-    }
+	// Create Temporary Download Dir
+	createTemp()
+	defer cleanTemp()
 
-    var assetPack assetpack.AssetPack
-    err = json.Unmarshal(stat, &assetPack)
-    if err != nil {
-        fmt.Println(err)
-    }
+	// Check for self upgrade
+	fmt.Printf("Checking for patcher update.\n")
+	binPath := os.Args[0]
+	bin := filepath.Base(binPath)
+	hash, _ := assetpack.HashFile(binPath)
 
-    // Check for self upgrade
-    binPath, _ := osext.Executable()
-    bin := filepath.Base(binPath)
-    //binDir := filepath.Dir(binPath)
-    binAsset, ok := assetPack.Assets[bin]
-    if ok {
-        hash, _ := assetpack.HashFile(bin)
+	if hash != assetPack.PatcherHash {
+		fmt.Println("Found update for patcher.")
+		downloadFilePatcher(bin)
+		fmt.Print("Installing update...")
+		_ = os.Rename(bin, "~"+bin)
+		copyFile(bin, downloadDir+bin)
 
-        if hash != binAsset.Hash {
-            fmt.Println("Found update for patcher.")
-            downloadFile(binAsset.Path)
-            fmt.Println("Installing update...")
-            _ = os.Rename(bin, "~" + bin)
-            copyFile(bin, "download/" + bin)
-            //fmt.Println("Please restart patcher.")
-            //fmt.Println("Restarting patcher.")
+		fmt.Println("done.")
+		fmt.Println("Restarting patcher.")
+		cmd := exec.Command(binPath)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		err := cmd.Start()
+		if err != nil {
+			fmt.Println(err)
+		}
 
-            /*var procAttr os.ProcAttr 
-            procAttr.Files = []*os.File{nil, nil, nil}
-            _, err := os.StartProcess(binPath, nil, &procAttr)
-            if err != nil {
-                fmt.Println(err)
-            }*/
-            cmd := exec.Command(binPath)
-            cmd.Stdin = os.Stdin
-            cmd.Stdout = os.Stdout
-            cmd.Stderr = os.Stderr
-            err := cmd.Start()
-            if err != nil {
-                fmt.Println(err)
-            }
+		cleanTemp()
+		os.Exit(0)
+	} else {
+		fmt.Println("No update.")
+	}
 
-            os.Exit(0)
-        }
-    }
+	for k, v := range assetPack.Assets {
+		_ = k
+		hash, _ := assetpack.HashFile(v.Path)
 
-    for k, v := range assetPack.Assets {
-        _ = k
-        hash, _ := assetpack.HashFile(v.Path)
+		if hash != v.Hash {
+			downloadFile(v.Path)
+			copyFile(v.Path, downloadDir+v.Path)
+		}
+	}
+}
 
-        if hash != v.Hash {
-            downloadFile(v.Path)
-            copyFile(v.Path, "download/" + v.Path)
-        }
-    }
+func createTemp() {
+	wd, _ := os.Getwd()
+	downloadDir, _ = ioutil.TempDir(wd, "~temp")
+	downloadDir = downloadDir + "/"
+	err := os.MkdirAll(downloadDir, 0777)
+	if err != nil {
+		fmt.Println(err)
+	}
+}
 
-    err = os.RemoveAll("download")
-    if err != nil {
-        fmt.Println(err)
-    }
+func cleanTemp() {
+	err := os.RemoveAll(downloadDir)
+	if err != nil {
+		fmt.Println(err)
+	}
 }

@@ -3,61 +3,67 @@ package main
 import "net/http"
 import "fmt"
 import "flag"
+import "time"
 import "encoding/json"
 import "./assetpack"
 import "path/filepath"
-import "github.com/howeyc/fsnotify"
 
 var assetStatJSON string
-var watcher *fsnotify.Watcher
+var assetAbsDir string
+var patcherAbsDir string
 
 func statHandler(w http.ResponseWriter, r *http.Request) {
-    fmt.Fprintf(w, "%s", assetStatJSON)
+	refreshAssets(assetAbsDir, patcherAbsDir)
+	fmt.Fprintf(w, "%s", assetStatJSON)
 }
 
-func watcherLoop() {
-    for {
-        select {
-        case ev := <-watcher.Event:
-            fmt.Println("Event")
-        case err := <-watcher.Error:
-            fmt.Println("Error")
-        }
-    }
+func patcherHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Printf("Serving Patcher '%s'\n", patcherAbsDir)
+	http.ServeFile(w, r, patcherAbsDir)
+}
+
+func fileWatcher(watchPath string) {
+	for {
+		fmt.Print("Checking for file changes...")
+		fmt.Println("complete.")
+		time.Sleep(time.Second * 10)
+	}
+}
+
+func refreshAssets(absDir string, patcherDir string) {
+	fmt.Printf("Refreshing dir '%s'\n", absDir)
+	assetPack := assetpack.Load(absDir, patcherDir)
+
+	b, err := json.MarshalIndent(assetPack, "", "")
+	assetStatJSON = string(b)
+	if err != nil {
+		panic(err)
+	}
 }
 
 func main() {
-    var dir = flag.String("dir", "files", "Directory to serve files from")
-    var port = flag.Int("port", 8080, "Port for HTTP server to listen on")
-    flag.Parse()
+	var dir = flag.String("dir", "files", "Directory to serve files from")
+	var port = flag.Int("port", 8989, "Port for HTTP server to listen on")
+	var patcher = flag.String("patcher", "patcher.exe", "Patcher binary")
 
-    // Create Watcher
-    watcher, err := fsnotify.NewWatcher()
-    if err != nil {
-        panic(err)
-    }
+	flag.Parse()
 
-    // Convert path to absolute
-    absDir, _ := filepath.Abs(*dir)
-    portString := fmt.Sprintf(":%v", *port)
+	// Convert path to absolute
+	assetAbsDir, _ = filepath.Abs(*dir)
+	patcherAbsDir, _ = filepath.Abs(*patcher)
+	portString := fmt.Sprintf(":%v", *port)
 
-    err = watcher.Watch(absDir)
-    if err != nil {
-        panic(err)
-    }
+	// Load Asset stats
+	refreshAssets(assetAbsDir, patcherAbsDir)
 
-    assetPack := assetpack.Load(absDir)
+	// Start Watcher
+	//go fileWatcher(absDir)
 
-    b, err := json.MarshalIndent(assetPack, "", "")
-    assetStatJSON = string(b)
-    if err != nil {
-        panic(err)
-    }
+	fmt.Printf("Serving directory '%v' on port '%v'\n", assetAbsDir, *port)
 
-    fmt.Printf("Serving directory '%v' on port '%v'\n", absDir, *port)
-
-    fileServer := http.StripPrefix("/files/", http.FileServer(http.Dir(absDir)))
-    http.Handle("/files/", fileServer)
-    http.HandleFunc("/stat/", statHandler)
-    http.ListenAndServe(portString, nil)
+	fileServer := http.StripPrefix("/files/", http.FileServer(http.Dir(assetAbsDir)))
+	http.Handle("/files/", fileServer)
+	http.HandleFunc("/stat/", statHandler)
+	http.HandleFunc("/patcher/", patcherHandler)
+	http.ListenAndServe(portString, nil)
 }
